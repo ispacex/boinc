@@ -1,6 +1,6 @@
 // This file is part of BOINC.
-// http://boinc.berkeley.edu
-// Copyright (C) 2008 University of California
+// https://boinc.berkeley.edu
+// Copyright (C) 2026 University of California
 //
 // BOINC is free software; you can redistribute it and/or modify it
 // under the terms of the GNU Lesser General Public License
@@ -442,8 +442,11 @@ static bool update_app_progress(double cpu_t, double cp_cpu_t) {
     if (fout) {
         fputs(msg_buf, fout);
     }
-    return 0;
+    return true;
 #else
+    if (!app_client_shm || !app_client_shm->shm) {
+        return false;
+    }
     return app_client_shm->shm->app_status.send_msg(msg_buf);
 #endif
 }
@@ -456,7 +459,11 @@ static void handle_heartbeat_msg() {
     bool btemp;
     int i;
 
-    if (!app_client_shm->shm->heartbeat.get_msg(buf)) {
+    if (
+        !app_client_shm ||
+        !app_client_shm->shm ||
+        !app_client_shm->shm->heartbeat.get_msg(buf)
+        ) {
         return;
     }
     boinc_status.network_suspended = false;
@@ -551,7 +558,10 @@ static void sporadic_files() {
         if (t != last_ac_mod_time) {
             lseek(ac_fd, 0, SEEK_SET);
             int nc = read(ac_fd, buf, sizeof(buf));
-            if (nc>0) {
+            if (nc >= static_cast<int>(sizeof(buf))) {
+                nc = sizeof(buf) - 1;
+            }
+            if (nc > 0) {
                 int val;
                 buf[nc] = 0;
                 int n = sscanf(buf, "%d", &val);
@@ -578,7 +588,7 @@ static void parallel_master(int child_pid) {
     while (1) {
         boinc_sleep(TIMER_PERIOD);
         interrupt_count++;
-        if (app_client_shm) {
+        if (app_client_shm && app_client_shm->shm) {
             handle_heartbeat_msg();
             if (app_client_shm->shm->process_control_request.get_msg(buf)) {
                 if (match_tag(buf, "<suspend/>")) {
@@ -837,7 +847,11 @@ static void send_trickle_up_msg() {
     }
     if (strlen(buf)) {
         BOINCINFO("Sending Trickle Up Message");
-        if (app_client_shm->shm->trickle_up.send_msg(buf)) {
+        if (
+            app_client_shm &&
+            app_client_shm->shm &&
+            app_client_shm->shm->trickle_up.send_msg(buf)
+            ) {
             have_new_trickle_up = false;
             have_new_upload_file = false;
         }
@@ -1053,6 +1067,13 @@ int boinc_parse_init_data_file() {
         return ERR_FOPEN;
     }
     f = boinc_fopen(INIT_DATA_FILE, "r");
+    if (!f) {
+        fprintf(stderr,
+            "%s Can't open init data file - running in standalone mode\n",
+            boinc_msg_prefix(buf, sizeof(buf))
+        );
+        return ERR_FOPEN;
+    }
     retval = parse_init_data_file(f, aid);
     fclose(f);
     if (retval) {
@@ -1108,7 +1129,11 @@ int boinc_report_app_status_aux(
     }
     return 0;
 #else
-    if (app_client_shm->shm->app_status.send_msg(msg_buf)) {
+    if (
+        app_client_shm &&
+        app_client_shm->shm &&
+        app_client_shm->shm->app_status.send_msg(msg_buf)
+        ) {
         return 0;
     }
     return ERR_WRITE;
@@ -1231,7 +1256,7 @@ static void handle_upload_file_status() {
             UPLOAD_FILE_STATUS uf;
             uf.name = std::string(log_name);
             uf.status = status;
-            upload_file_status.push_back(uf);
+            upload_file_status.push_back(std::move(uf));
         } else {
             fprintf(stderr, "%s handle_upload_file_status: can't parse %s\n",
                 boinc_msg_prefix(log_buf, sizeof(log_buf)), buf
@@ -1244,7 +1269,11 @@ static void handle_upload_file_status() {
 //
 static void handle_trickle_down_msg() {
     char buf[MSG_CHANNEL_SIZE];
-    if (app_client_shm->shm->trickle_down.get_msg(buf)) {
+    if (
+        app_client_shm &&
+        app_client_shm->shm &&
+        app_client_shm->shm->trickle_down.get_msg(buf)
+        ) {
         BOINCINFO("Received Trickle Down Message");
         if (match_tag(buf, "<have_trickle_down/>")) {
             have_trickle_down = true;
@@ -1282,7 +1311,11 @@ static void handle_process_control_msg() {
         return;
     }
 #else
-    if (!app_client_shm->shm->process_control_request.get_msg(buf)) {
+    if (
+        !app_client_shm ||
+        !app_client_shm->shm ||
+        !app_client_shm->shm->process_control_request.get_msg(buf)
+        ) {
         return;
     }
 #endif
@@ -1394,7 +1427,7 @@ static void timer_handler() {
 #ifdef MSGS_FROM_FILE
     handle_process_control_msg();
 #else
-    if (app_client_shm) {
+    if (app_client_shm && app_client_shm->shm) {
         if (options.check_heartbeat) {
             handle_heartbeat_msg();
         }
@@ -1455,21 +1488,28 @@ static void timer_handler() {
 
     // send graphics-related messages
     //
-    if (send_web_graphics_url && !app_client_shm->shm->graphics_reply.has_msg()) {
-        snprintf(buf, sizeof(buf),
-            "<web_graphics_url>%s</web_graphics_url>",
-            web_graphics_url
-        );
-        app_client_shm->shm->graphics_reply.send_msg(buf);
-        send_web_graphics_url = false;
-    }
-    if (send_remote_desktop_addr && !app_client_shm->shm->graphics_reply.has_msg()) {
-        snprintf(buf, sizeof(buf),
-            "<remote_desktop_addr>%s</remote_desktop_addr>",
-            remote_desktop_addr
-        );
-        app_client_shm->shm->graphics_reply.send_msg(buf);
-        send_remote_desktop_addr = false;
+    if (
+        app_client_shm &&
+        app_client_shm->shm
+        ) {
+        if (send_web_graphics_url &&
+            !app_client_shm->shm->graphics_reply.has_msg()) {
+            snprintf(buf, sizeof(buf),
+                "<web_graphics_url>%s</web_graphics_url>",
+                web_graphics_url
+            );
+            app_client_shm->shm->graphics_reply.send_msg(buf);
+            send_web_graphics_url = false;
+        }
+        if (send_remote_desktop_addr &&
+            !app_client_shm->shm->graphics_reply.has_msg()) {
+            snprintf(buf, sizeof(buf),
+                "<remote_desktop_addr>%s</remote_desktop_addr>",
+                remote_desktop_addr
+            );
+            app_client_shm->shm->graphics_reply.send_msg(buf);
+            send_remote_desktop_addr = false;
+        }
     }
 
     if (do_sporadic_files) {
